@@ -1,0 +1,32 @@
+{
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@google-cloud/speech": "^7.2.0",
+    "@google-cloud/vision": "^5.1.0",
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.9.0",
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
+    "docx": "^9.5.0",
+    "dotenv": "^16.5.0",
+    "ejs": "^3.1.10",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "form-data": "^4.0.4",
+    "multer": "^2.0.0",
+    "pdf-lib": "^1.17.1",
+    "replicate": "^1.0.1",
+    "request": "^2.88.2",
+    "sharp": "^0.34.3"
+  }
+}
