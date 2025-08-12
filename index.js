@@ -11,6 +11,16 @@ const FormData = require('form-data');
 const app = express();
 const Replicate =require('replicate');
 const sharp = require('sharp');
+const { exec } = require('child_process');
+const ytDlpPath = `"C:\\Users\\Computer\\AppData\\Roaming\\Python\\Python312\\Scripts\\yt-dlp.exe"`;
+const https = require('https');
+const http = require('http');
+const url = require('url');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const morgan = require('morgan')
+const geoip = require('geoip-lite');
+
 app.use(cors());
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -18,10 +28,10 @@ app.use(express.json({ limit: '50mb' })); // رفع الحد إلى 50 ميغا�
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 
-app.set('view engine','ejs');
-app.get('/',(req,res)=>{
-     res.render("index.ejs")
-})
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
 
 const upload2 =  multer({
   storage: multer.diskStorage({
@@ -65,32 +75,190 @@ app.get('/',(req,res)=>{
 })
 
 
-// app.post('/templates', async (req, res) => {
-//   try {
-//     console.log("PIXVERSE_KEY:", process.env.PIXVERSE_KEY?.substring(0, 5) + "..."); // للتأكد من وجود المفتاح
 
-//     const response = await axios.get('https://api.pixapi.pro/api/pvTemplates', {
-//       headers: {
-//         Authorization: `Bearer ${process.env.PIXVERSE_KEY}`
-//       },
-//       params: {
-//         accountId: "350878975345589" // استبدلها بالقيمة الفعلية
-//       }
-//     });
+const TELEGRAM_BOT_TOKEN = process.env.TEL_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TEL_ID;
 
-//     res.json(response.data.items || response.data.templates || response.data.result || []);
-//   } catch (err) {
-//     console.error("API Error:", {
-//       message: err.message,
-//       status: err.response?.status,
-//       data: err.response?.data
-//     });
-//     res.status(500).json({ 
-//       error: 'Failed to fetch templates',
-//       details: err.response?.data || err.message 
-//     });
-//   }
-// });
+async function sendToTelegram(message) {
+  try {
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: 'HTML' // دعم تنسيق HTML في الرسائل (اختياري)
+    });
+  } catch (err) {
+    console.error("خطأ في إرسال التليجرام:", err.message);
+  }
+}
+
+// استقبال أي زيارة للصفحة
+let lastSentTimestamp = 0;  // وقت آخر رسالة أُرسلت (بـ timestamp)
+
+app.post('/log-visit', async (req, res) => {
+  try {
+    let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || '';
+    ip = ip.split(',')[0].trim();
+    ip = ip.replace("::ffff:", "");
+
+    const geo = geoip.lookup(ip) || {};
+    const now = new Date();
+    const nowTs = now.getTime();
+
+    // مدة الحظر بين الرسائل (مثلاً 5 ثواني = 5000 مللي ثانية)
+    const throttleMs = 5000;
+
+    if (nowTs - lastSentTimestamp > throttleMs) {
+      // نرسل الرسالة فقط إذا مر وقت كافي
+      await sendToTelegram(`📢 زيارة جديدة:\nIP: <code>${ip}</code>\nالدولة: ${geo.country || 'غير معروف'}\nالمدينة: ${geo.city || 'غير معروف'}\nالوقت: ${now.toLocaleString()}`);
+
+      lastSentTimestamp = nowTs; // تحديث وقت آخر رسالة
+    } else {
+      console.log('تم تجاهل إرسال الرسالة لتجنب التكرار.');
+    }
+
+    res.send(`
+      <h1>🎉 أهلاً بك في صفحة عيد الميلاد!</h1>
+      <p>تم تسجيل زيارتك بنجاح ✅</p>
+    `);
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).send('حدث خطأ أثناء تسجيل الزيارة');
+  }
+});
+
+const logsDir = path.join(__dirname, 'logs');
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir);
+}
+
+const errorLogStream = fs.createWriteStream(path.join(logsDir, 'errors.log'), { flags: 'a' });
+
+// تحسين API لجلب معلومات الفيديو
+app.post('/api/get-video-info', async (req, res) => {
+  const { videoUrl } = req.body;
+
+  if (!videoUrl) {
+    return res.status(400).json({ 
+      success: false,
+      error: 'videoUrl is required'
+    });
+  }
+
+  try {
+    // جلب معلومات الفيديو مع أفضل صيغ MP4
+    const videoCommand = `${ytDlpPath} -j --format "(bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best)" "${videoUrl}"`;
+    const { stdout: videoStdout } = await execAsync(videoCommand);
+    const videoInfo = JSON.parse(videoStdout);
+
+    // جلب معلومات الصوت MP3
+    const audioCommand = `${ytDlpPath} -j --format "bestaudio" --extract-audio --audio-format mp3 "${videoUrl}"`;
+    const { stdout: audioStdout } = await execAsync(audioCommand);
+    const audioInfo = JSON.parse(audioStdout);
+
+    // معالجة وتصنيف الصيغ
+    const processFormats = (formats, type) => {
+      return formats
+        .filter(f => type === 'video' ? f.ext === 'mp4' : f.ext === 'mp3')
+        .map(f => ({
+          quality: type === 'video' ? 
+            (f.height ? `${f.height}p` : f.format_note || 'Default') :
+            (f.abr ? `${f.abr}kbps` : 'Audio'),
+          url: f.url,
+          filesize: f.filesize,
+          ext: f.ext,
+          height: f.height || 0,
+          bitrate: f.tbr || f.abr || 0
+        }))
+        .sort((a, b) => type === 'video' ? a.height - b.height : a.bitrate - b.bitrate);
+    };
+
+    res.json({
+      success: true,
+      data: {
+        id: videoInfo.id,
+        title: videoInfo.title,
+        thumbnail: videoInfo.thumbnail,
+        duration: videoInfo.duration,
+        uploader: videoInfo.uploader,
+        view_count: videoInfo.view_count,
+        formats: processFormats(videoInfo.formats || [], 'video'),
+        audio_formats: processFormats([audioInfo], 'audio'),
+        webpage_url: videoInfo.webpage_url || videoUrl
+      }
+    });
+
+  } catch (error) {
+    errorLogStream.write(`[${new Date().toISOString()}] Error: ${error.message}\n`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process video info'
+    });
+  }
+});
+
+// تحسين API للتنزيل
+app.get('/api/download', async (req, res) => {
+  try {
+    const { url: mediaUrl, title, ext, type = 'video' } = req.query;
+
+    if (!mediaUrl) {
+      return res.status(400).json({ error: 'Missing media URL' });
+    }
+
+    // إنشاء اسم ملف آمن
+    const safeTitle = (title || 'media').replace(/[^a-zA-Z0-9_\-.]/g, '_').substring(0, 100);
+    const fileExt = ext || (type === 'audio' ? 'mp3' : 'mp4');
+    const filename = `${safeTitle}.${fileExt}`;
+
+    // إذا كان الرابط من نوع M3U8، نقوم بتحويله أولاً
+    if (mediaUrl.includes('.m3u8')) {
+      const tempFile = path.join(__dirname, 'temp', filename);
+      await execAsync(`${ytDlpPath} -o ${tempFile} --remux-video ${fileExt} "${mediaUrl}"`);
+      
+      return res.download(tempFile, filename, (err) => {
+        if (err) console.error('Download error:', err);
+        fs.unlinkSync(tempFile); // حذف الملف المؤقت بعد التنزيل
+      });
+    }
+
+    // التنزيل المباشر للصيغ الأخرى
+    const parsedUrl = url.parse(mediaUrl);
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+
+    client.get(mediaUrl, (streamRes) => {
+      if (streamRes.statusCode !== 200) {
+        return res.status(streamRes.statusCode).json({ error: 'Failed to fetch media' });
+      }
+
+      // إعداد رؤوس الاستجابة لفرض التنزيل
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', type === 'audio' ? 'audio/mpeg' : 'video/mp4');
+      res.setHeader('Content-Length', streamRes.headers['content-length'] || '');
+
+      streamRes.pipe(res);
+    }).on('error', (err) => {
+      errorLogStream.write(`[${new Date().toISOString()}] Download Error: ${err.message}\n`);
+      res.status(500).json({ error: 'Download failed' });
+    });
+
+  } catch (err) {
+    errorLogStream.write(`[${new Date().toISOString()}] Server Error: ${err.message}\n`);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// دالة مساعدة لتنفيذ الأوامر
+function execAsync(command) {
+  return new Promise((resolve, reject) => {
+    exec(command, (error, stdout, stderr) => {
+      if (error) return reject(error);
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+
 
 app.get('/templates', async (req, res) => {
   try {
@@ -575,31 +743,7 @@ const client = new speech.SpeechClient({
 });
 
 const sessions2 = {}; // لتخزين المحادثات حسب sessionId
-const { v4: uuidv4 } = require('uuid');
 
-// دالة بديلة لتحويل النص إلى صوت باستخدام نظام التشغيل (Linux/macOS)
-async function textToSpeechFallback(text, language = 'ar') {
-  const outputFile = path.join('/tmp', `${uuidv4()}.wav`);
-  
-  return new Promise((resolve, reject) => {
-    const command = `espeak -v ${language} "${text}" --stdout > ${outputFile}`;
-    
-    require('child_process').exec(command, async (error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      
-      try {
-        const audioData = await fs.promises.readFile(outputFile);
-        await fs.promises.unlink(outputFile);
-        resolve(audioData);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  });
-}
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 app.post('/api/speech-to-voice', async (req, res) => {
   try {
@@ -989,197 +1133,168 @@ async function downloadFile(url) {
 
 
 
-app.get('/search', async (req, res) => {
-  const q = req.query.q;
+// app.get('/search', async (req, res) => {
+//   const q = req.query.q;
 
-  try {
-    const response = await axios.get('https://axesso-axesso-amazon-data-service-v1.p.rapidapi.com/amz/amazon-search-by-keyword-asin', {
-      params: {
-        keyword: q,
-        domainCode: 'com',
-        page: '1'
-      },
-      headers: {
-        'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
-        'X-RapidAPI-Host': 'axesso-axesso-amazon-data-service-v1.p.rapidapi.com'
-      }
-    });
+//   try {
+//     const response = await axios.get('https://axesso-axesso-amazon-data-service-v1.p.rapidapi.com/amz/amazon-search-by-keyword-asin', {
+//       params: {
+//         keyword: q,
+//         domainCode: 'com',
+//         page: '1'
+//       },
+//       headers: {
+//         'X-RapidAPI-Key': process.env.RAPIDAPI_KEY,
+//         'X-RapidAPI-Host': 'axesso-axesso-amazon-data-service-v1.p.rapidapi.com'
+//       }
+//     });
 
-    res.json(response.data);
-  } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: 'API request failed' });
-  }
-});
+//     res.json(response.data);
+//   } catch (err) {
+//     console.error(err.response?.data || err.message);
+//     res.status(500).json({ error: 'API request failed' });
+//   }
+// });
 
 
-app.post('/detect-labels', upload.single('image'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'لم يتم تقديم صورة' });
-    }
+// app.post('/detect-labels', upload.single('image'), async (req, res) => {
+//   try {
+//     if (!req.file) {
+//       return res.status(400).json({ error: 'لم يتم تقديم صورة' });
+//     }
 
-    // الهيكل الصحيح للطلب
-    const [result] = await client.annotateImage({
-      image: { content: req.file.buffer.toString('base64') },
-      features: [{ type: 'LABEL_DETECTION' }], // تحديد الميزة المطلوبة
-    });
+//     // الهيكل الصحيح للطلب
+//     const [result] = await client.annotateImage({
+//       image: { content: req.file.buffer.toString('base64') },
+//       features: [{ type: 'LABEL_DETECTION' }], // تحديد الميزة المطلوبة
+//     });
 
-    const labels = result.labelAnnotations.map(label => ({
-      description: label.description,
-      score: label.score,
-    }));
+//     const labels = result.labelAnnotations.map(label => ({
+//       description: label.description,
+//       score: label.score,
+//     }));
 
-    res.json({ labels });
-  } catch (error) {
-    console.error('Vision API Error:', error);
-    res.status(500).json({ 
-      error: 'فشل في معالجة الصورة',
-      details: error.message 
-    });
-  }
-});
-app.post('/chat', async (req, res) => {
-  const { message } = req.body;
+//     res.json({ labels });
+//   } catch (error) {
+//     console.error('Vision API Error:', error);
+//     res.status(500).json({ 
+//       error: 'فشل في معالجة الصورة',
+//       details: error.message 
+//     });
+//   }
+// });
+// app.post('/chat', async (req, res) => {
+//   const { message } = req.body;
 
-   try {
-    const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
-      {
-        model: 'openai/gpt-3.5-turbo',
-        messages: [{ role: 'user', content: message }],
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
+//    try {
+//     const response = await axios.post(
+//       'https://openrouter.ai/api/v1/chat/completions',
+//       {
+//         model: 'openai/gpt-3.5-turbo',
+//         messages: [{ role: 'user', content: message }],
+//       },
+//       {
+//         headers: {
+//           'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+//           'Content-Type': 'application/json',
+//         },
+//       }
       
-    );
- const reply = response.data.choices[0].message.content;
-    // console.log(" GPT Reply:", reply);
+//     );
+//  const reply = response.data.choices[0].message.content;
+//     // console.log(" GPT Reply:", reply);
 
-    // ✅ إرسال رد واحد فقط
-    // return res.status(200).send("✅ تم طباعة الرد في السيرفر");
-res.send(reply); 
-    // return response.data.choices[0].message.content;
-  } catch (error) {
-    console.error('❌ OpenRouter error:', error.response?.data || error.message);
-    return 'عذرًا، حدث خطأ أثناء الاتصال بالنموذج.';
-  }
-});
+//     // ✅ إرسال رد واحد فقط
+//     // return res.status(200).send("✅ تم طباعة الرد في السيرفر");
+// res.send(reply); 
+//     // return response.data.choices[0].message.content;
+//   } catch (error) {
+//     console.error('❌ OpenRouter error:', error.response?.data || error.message);
+//     return 'عذرًا، حدث خطأ أثناء الاتصال بالنموذج.';
+//   }
+// });
 
 
-app.post('/chat3', async (req, res) => {
-  const { message, sessionId } = req.body;
+// app.post('/chat3', async (req, res) => {
+//   const { message, sessionId } = req.body;
 
-  if (!message || !sessionId) {
-    return res.status(400).json({ error: "الرسالة أو sessionId مفقود" });
-  }
+//   if (!message || !sessionId) {
+//     return res.status(400).json({ error: "الرسالة أو sessionId مفقود" });
+//   }
 
-  // صورة أم نص؟
-  const isImageRequest = message.toLowerCase().includes("draw") ;
+//   // صورة أم نص؟
+//   const isImageRequest = message.toLowerCase().includes("draw") ;
 
-  // if (isImageRequest) {
-    // إرسال إلى Stability AI (إنشاء صورة)
-    try {
-      const response = await axios.post(
-        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image',
-        {
-    text_prompts: [{ text: message }],
-    cfg_scale: 7,
-    height: 1024,
-    width: 1024,
-    samples: 1,
-    steps: 30,
-  },
-  {
-    headers: {
-      'Authorization': `Bearer ${process.env.STABILITY_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-  }
-);
+//   // if (isImageRequest) {
+//     // إرسال إلى Stability AI (إنشاء صورة)
+//     try {
+//       const response = await axios.post(
+//         'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image',
+//         {
+//     text_prompts: [{ text: message }],
+//     cfg_scale: 7,
+//     height: 1024,
+//     width: 1024,
+//     samples: 1,
+//     steps: 30,
+//   },
+//   {
+//     headers: {
+//       'Authorization': `Bearer ${process.env.STABILITY_API_KEY}`,
+//       'Content-Type': 'application/json',
+//       'Accept': 'application/json',
+//     },
+//   }
+// );
 
-      const imageBase64 = response.data.artifacts[0].base64;
-      res.json({ image: imageBase64 }); // 👈 نرسل الصورة إلى Flutter بصيغة Base64
+//       const imageBase64 = response.data.artifacts[0].base64;
+//       res.json({ image: imageBase64 }); // 👈 نرسل الصورة إلى Flutter بصيغة Base64
 
-    } catch (error) {
-      console.error("❌ خطأ في توليد الصورة:", error.response?.data || error.message);
-      return res.status(500).json({ error: "حدث خطأ أثناء توليد الصورة" });
-  //   }
-  // } else {
-  //   // رد نصي عادي من OpenRouter
-  //   if (!sessions[sessionId]) sessions[sessionId] = [];
+//     } catch (error) {
+//       console.error("❌ خطأ في توليد الصورة:", error.response?.data || error.message);
+//       return res.status(500).json({ error: "حدث خطأ أثناء توليد الصورة" });
 
-  //   sessions[sessionId].push({ role: "user", content: message });
+//   }
+// });
 
-  //   try {
-  //     const response = await axios.post(
-  //       'https://openrouter.ai/api/v1/chat/completions',
-  //       {
-  //         model: 'openai/gpt-3.5-turbo',
-  //         messages: sessions[sessionId],
-  //       },
-  //       {
-  //         headers: {
-  //           'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-  //           'Content-Type': 'application/json',
-  //         },
-  //       }
-  //     );
+// app.post('/chatdeepseek', async (req, res) => {
+//   try {
+//     const userMessage = req.body.message; // الرسالة المرسلة من Flutter
 
-  //     const reply = response.data.choices[0].message.content;
-  //     sessions[sessionId].push({ role: "assistant", content: reply });
+//     if (!userMessage) {
+//       return res.status(400).json({ error: 'يجب إرسال رسالة نصية' });
+//     }
 
-  //     res.json({ reply }); // 👈 رد نصي
-  //   } catch (error) {
-  //     console.error("❌ OpenRouter error:", error.response?.data || error.message);
-  //     res.status(500).send("حدث خطأ في الرد من الذكاء الاصطناعي");
-  //   }
-  }
-});
+//     // إرسال الطلب إلى DeepSeek API
+//     const response = await axios.post(
+//       'https://api.deepseek.com/v1/chat/completions',
+//       {
+//         model: "deepseek-chat",
+//         messages: [{ role: "user", content: userMessage }],
+//       },
+//       {
+//         headers: {
+//           'Content-Type': 'application/json',
+//           'Authorization': `Bearer ${process.env.DEEBSEEK_API_KEY}`,
+//         },
+//       }
+//     );
 
-app.post('/chatdeepseek', async (req, res) => {
-  try {
-    const userMessage = req.body.message; // الرسالة المرسلة من Flutter
+//     // إرسال الإجابة إلى Flutter
+//     const aiResponse = response.data.choices[0].message.content;
+//     res.json({ reply: aiResponse });
 
-    if (!userMessage) {
-      return res.status(400).json({ error: 'يجب إرسال رسالة نصية' });
-    }
-
-    // إرسال الطلب إلى DeepSeek API
-    const response = await axios.post(
-      'https://api.deepseek.com/v1/chat/completions',
-      {
-        model: "deepseek-chat",
-        messages: [{ role: "user", content: userMessage }],
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.DEEBSEEK_API_KEY}`,
-        },
-      }
-    );
-
-    // إرسال الإجابة إلى Flutter
-    const aiResponse = response.data.choices[0].message.content;
-    res.json({ reply: aiResponse });
-
-  } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
+//   } catch (error) {
+//     console.error('Error:', error.response?.data || error.message);
     
-    // إرسال رسالة خطأ واضحة بناءً على حالة الـ API
-    if (error.response?.status === 402) {
-      res.status(402).json({ error: 'الاشتراك غير كافي. يرجى تجديد الخطة في DeepSeek.' });
-    } else {
-      res.status(500).json({ error: 'حدث خطأ أثناء معالجة السؤال' });
-    }
-  }
-});
-app.listen(3000, () => {
-  console.log('🚀 Server running on http://localhost:3000');
+//     // إرسال رسالة خطأ واضحة بناءً على حالة الـ API
+//     if (error.response?.status === 402) {
+//       res.status(402).json({ error: 'الاشتراك غير كافي. يرجى تجديد الخطة في DeepSeek.' });
+//     } else {
+//       res.status(500).json({ error: 'حدث خطأ أثناء معالجة السؤال' });
+//     }
+//   }
+// });
+app.listen(8000, () => {
+  console.log('🚀 Server running on http://localhost:8000');
 });

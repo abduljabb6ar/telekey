@@ -1,0 +1,11 @@
+[2025-08-09T15:16:01.374Z] Error: Command failed: "C:\Users\Computer\AppData\Roaming\Python\Python312\Scripts\yt-dlp.exe" -j --format "bestaudio" --extract-audio --audio-format mp3 "https://youtu.be/3ImW1fq0qIk?list=LL"
+WARNING: [youtube:tab] Unable to recognize playlist. Downloading just video 3ImW1fq0qIk
+WARNING: [youtube] 3ImW1fq0qIk: Some web client https formats have been skipped as they are missing a url. YouTube is forcing SABR streaming for this client. See  https://github.com/yt-dlp/yt-dlp/issues/12482  for more details
+ERROR: [download] Got error: HTTP Error 403: Forbidden
+ERROR: fragment 1 not found, unable to continue
+WARNING: Unable to download format 234. Skipping...
+ERROR: [download] Got error: HTTP Error 403: Forbidden
+ERROR: fragment 1 not found, unable to continue
+WARNING: Unable to download format 233. Skipping...
+ERROR: [youtube] 3ImW1fq0qIk: Requested format is not available. Use --list-formats for a list of available formats
+
