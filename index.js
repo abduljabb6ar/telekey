@@ -84,15 +84,14 @@ async function sendToTelegram(message) {
     await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       chat_id: TELEGRAM_CHAT_ID,
       text: message,
-      parse_mode: 'HTML' // دعم تنسيق HTML في الرسائل (اختياري)
+      parse_mode: 'HTML'
     });
   } catch (err) {
     console.error("خطأ في إرسال التليجرام:", err.message);
   }
 }
 
-// استقبال أي زيارة للصفحة
-let lastSentTimestamp = 0;  // وقت آخر رسالة أُرسلت (بـ timestamp)
+let lastSentTimestamp = 0;
 
 app.post('/log-visit', async (req, res) => {
   try {
@@ -102,17 +101,37 @@ app.post('/log-visit', async (req, res) => {
 
     const geo = geoip.lookup(ip) || {};
 
-    const now = moment().tz('Asia/Riyadh'); // عدل 'Asia/Riyadh' حسب منطقتك الزمنية
-    const nowTs = now.valueOf(); // الوقت بالميللي ثانية
+    const now = moment().tz('Asia/Riyadh');
+    const nowTs = now.valueOf();
 
-    // مدة الحظر بين الرسائل (مثلاً 5 ثواني = 5000 مللي ثانية)
+    // استلام بيانات العميل من body
+    const {
+      os = 'غير معروف',
+      browser = 'غير معروف',
+      language = 'غير معروف',
+      screenWidth = 'غير معروف',
+      screenHeight = 'غير معروف',
+      deviceType = 'غير معروف'
+    } = req.body || {};
+
     const throttleMs = 5000;
 
     if (nowTs - lastSentTimestamp > throttleMs) {
-      // نرسل الرسالة فقط إذا مر وقت كافي
-      await sendToTelegram(`📢 زيارة جديدة:\nIP: <code>${ip}</code>\nالدولة: ${geo.country || 'غير معروف'}\nالمدينة: ${geo.city || 'غير معروف'}\nالوقت: ${now.format('YYYY-MM-DD hh:mm:ss A')}`);
+      const message = `📢 زيارة جديدة:
+IP: <code>${ip}</code>
+الدولة: ${geo.country || 'غير معروف'}
+المدينة: ${geo.city || 'غير معروف'}
+الوقت: ${now.format('YYYY-MM-DD hh:mm:ss A')}
+نظام التشغيل: ${os}
+المتصفح: ${browser}
+اللغة: ${language}
+أبعاد الشاشة: ${screenWidth}x${screenHeight}
+نوع الجهاز: ${deviceType}
+      `;
 
-      lastSentTimestamp = nowTs; // تحديث وقت آخر رسالة
+      await sendToTelegram(message);
+
+      lastSentTimestamp = nowTs;
     } else {
       console.log('تم تجاهل إرسال الرسالة لتجنب التكرار.');
     }
@@ -127,7 +146,6 @@ app.post('/log-visit', async (req, res) => {
     res.status(500).send('حدث خطأ أثناء تسجيل الزيارة');
   }
 });
-
 const logsDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir);
