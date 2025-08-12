@@ -27,7 +27,7 @@ app.use(bodyParser.urlencoded({ extended: false }));
 app.use(express.json({ limit: '50mb' })); // رفع الحد إلى 50 ميغابايت
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-
+const moment = require('moment-timezone');
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100 // limit each IP to 100 requests per windowMs
@@ -101,15 +101,16 @@ app.post('/log-visit', async (req, res) => {
     ip = ip.replace("::ffff:", "");
 
     const geo = geoip.lookup(ip) || {};
-    const now = new Date();
-    const nowTs = now.getTime();
+
+    const now = moment().tz('Asia/Riyadh'); // عدل 'Asia/Riyadh' حسب منطقتك الزمنية
+    const nowTs = now.valueOf(); // الوقت بالميللي ثانية
 
     // مدة الحظر بين الرسائل (مثلاً 5 ثواني = 5000 مللي ثانية)
     const throttleMs = 5000;
 
     if (nowTs - lastSentTimestamp > throttleMs) {
       // نرسل الرسالة فقط إذا مر وقت كافي
-      await sendToTelegram(`📢 زيارة جديدة:\nIP: <code>${ip}</code>\nالدولة: ${geo.country || 'غير معروف'}\nالمدينة: ${geo.city || 'غير معروف'}\nالوقت: ${now.toLocaleString()}`);
+      await sendToTelegram(`📢 زيارة جديدة:\nIP: <code>${ip}</code>\nالدولة: ${geo.country || 'غير معروف'}\nالمدينة: ${geo.city || 'غير معروف'}\nالوقت: ${now.format('YYYY-MM-DD hh:mm:ss A')}`);
 
       lastSentTimestamp = nowTs; // تحديث وقت آخر رسالة
     } else {
