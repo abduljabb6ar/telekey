@@ -1,3 +1,14 @@
+
+
+
+
+
+
+
+
+
+
+
 require("dotenv").config();
 const express = require('express');
 const cors = require('cors');
@@ -15,6 +26,7 @@ const url = require('url');
 const rateLimit = require('express-rate-limit');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const TelegramBot = require('node-telegram-bot-api');
+const { ImageAnnotatorClient } = require('@google-cloud/vision').v1;
 
 // ================== Telegram Setup ==================
 const token = process.env.TEL_TOKEN;
@@ -38,6 +50,11 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // 📌 Google Generative AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// 📌 Google Vision
+const visionClient = new ImageAnnotatorClient({
+  keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS)
+});
 
 // 📌 Helper: تنفيذ أوامر
 function execAsync(command) {
@@ -109,15 +126,6 @@ app.get('/api/download', async (req, res) => {
     const fileExt = ext || (type === 'audio' ? 'mp3' : 'mp4');
     const filename = `${safeTitle}.${fileExt}`;
 
-    if (mediaUrl.includes('.m3u8')) {
-      const tempFile = path.join(__dirname, 'temp', filename);
-      await execAsync(`${ytDlpPath} -o ${tempFile} --remux-video ${fileExt} "${mediaUrl}"`);
-      return res.download(tempFile, filename, (err) => {
-        if (err) console.error('Download error:', err);
-        fs.unlinkSync(tempFile);
-      });
-    }
-
     const parsedUrl = url.parse(mediaUrl);
     const client = parsedUrl.protocol === 'https:' ? https : http;
     client.get(mediaUrl, (streamRes) => {
@@ -126,7 +134,6 @@ app.get('/api/download', async (req, res) => {
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.setHeader('Content-Type', type === 'audio' ? 'audio/mpeg' : 'video/mp4');
       res.setHeader('Content-Length', streamRes.headers['content-length'] || '');
-
       streamRes.pipe(res);
     }).on('error', (err) => {
       res.status(500).json({ error: 'Download failed' });
@@ -136,7 +143,147 @@ app.get('/api/download', async (req, res) => {
   }
 });
 
-// ضع باقي APIs مثل edit-image, remove-bg, detect-text, detect-labels, chat2 هنا كما في كودك السابق
+// --- API: تعديل الصورة باستخدام Stability AI ---
+app.post('/edit-image', upload.single('image'), async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+    if (!prompt || prompt.trim().length < 5) return res.status(400).json({ error: 'Prompt too short' });
+
+    const processedBuffer = await sharp(req.file.buffer)
+      .resize({ width: 1024, height: 1024, fit: 'cover' })
+      .png()
+      .toBuffer();
+
+    const formData = new FormData();
+    formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
+    formData.append('text_prompts[0][text]', prompt);
+    formData.append('cfg_scale', 7);
+    formData.append('steps', 30);
+
+    const response = await axios.post(
+      'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+      formData,
+      { headers: { Authorization: `Bearer ${process.env.STABILITY_API_KEY}`, ...formData.getHeaders() }, maxBodyLength: Infinity }
+    );
+
+    res.json({ success: true, imageBase64: response.data.artifacts[0].base64 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- API: إزالة الخلفية ---
+app.post('/remove-bg', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+    const form = new FormData();
+    form.append('image_file', req.file.buffer, { filename: req.file.originalname });
+    form.append('size', 'auto');
+
+    const response = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
+      headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
+      responseType: 'arraybuffer',
+    });
+
+    res.set('Content-Type', 'image/png');
+    res.send(response.data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- API: كشف النص ---
+app.post('/detect-text', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+    const [result] = await visionClient.textDetection(req.file.buffer);
+    const text = result.textAnnotations[0]?.description || '';
+    res.json({ text });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- API: كشف تسميات الصورة ---
+app.post('/detect-labels', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+    const [result] = await visionClient.labelDetection(req.file.buffer);
+    const labels = result.labelAnnotations.map(l => l.description);
+    res.json({ labels });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- API: نقطة النهاية الذكية /chat2 ---
+const sessions = {};
+app.post('/chat2', upload.single('image'), async (req, res) => {
+  try {
+    const { message, sessionId } = req.body;
+    if (!sessionId || !message) return res.status(400).json({ error: 'sessionId & message required' });
+
+    const hasImage = !!req.file;
+    let action = 'chat';
+
+    // تحديد الأداة
+    const promptTool = `
+حدد نوع الطلب بناء على النص ووجود صورة:
+النص: "${message}"
+هل يوجد صورة: ${hasImage ? 'نعم' : 'لا'}
+النوع:
+`;
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+    const toolResp = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: promptTool }] }] });
+    const tool = toolResp.response.text().toLowerCase();
+    if ((tool.includes('remove-bg') || tool.includes('remove background')) && hasImage) action = 'remove-bg';
+    else if ((tool.includes('edit-image') || tool.includes('edit image')) && hasImage) action = 'edit-image';
+
+    if (action === 'remove-bg') {
+      const form = new FormData();
+      form.append('image_file', req.file.buffer, { filename: req.file.originalname });
+      const removeResp = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
+        headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
+        responseType: 'arraybuffer',
+      });
+      return res.json({ action, imageBase64: removeResp.data.toString('base64') });
+    }
+
+    if (action === 'edit-image') {
+      const processedBuffer = await sharp(req.file.buffer)
+        .resize({ width: 1024, height: 1024, fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+        .png()
+        .toBuffer();
+
+      const formData = new FormData();
+      formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
+      formData.append('text_prompts[0][text]', message);
+      formData.append('cfg_scale', 7);
+      formData.append('steps', 30);
+
+      const response = await axios.post(
+        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+        formData,
+        { headers: { Authorization: `Bearer ${process.env.STABILITY_API_KEY}`, ...formData.getHeaders() }, maxBodyLength: Infinity }
+      );
+      return res.json({ action, imageBase64: response.data.artifacts[0].base64 });
+    }
+
+    // دردشة نصية
+    if (!sessions[sessionId]) sessions[sessionId] = [];
+    sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
+    const result = await model.generateContent({ contents: sessions[sessionId] });
+    const reply = result.response.text();
+    sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
+
+    res.json({ action: 'chat', reply });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ================== Telegram Webhook ==================
 const WEBHOOK_URL = `https://keytele.onrender.com/webhook/${token}`;
@@ -170,7 +317,7 @@ bot.on('message', async (msg) => {
       clearInterval(typingInterval);
 
       if (response.data.action === 'edit-image' || response.data.action === 'remove-bg') {
-        await bot.sendPhoto(chatId, Buffer.from(response.data.imageBase64, 'base64'), { filename: 'image.png', contentType: 'image/png' });
+        await bot.sendPhoto(chatId, Buffer.from(response.data.imageBase64, 'base64'));
       } else if (response.data.reply) {
         await bot.sendMessage(chatId, response.data.reply);
       }
