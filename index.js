@@ -1,6 +1,5 @@
 
 
-
 require("dotenv").config();
 const express = require('express');
 const cors = require('cors');
@@ -124,8 +123,7 @@ app.get('/api/download', async (req,res)=>{
 
 // --- API: نقطة النهاية الذكية /chat2 ---
 
-    انا لم اطلب منك تضمينها داخل نقطة النهاية
-
+  
 // --- دالة تحديد نوع الطلب باستخدام LLM Gemini ---
 async function decideTool(text, hasImage) {
 const prompt = `
