@@ -32,6 +32,7 @@
     "mongoose": "^8.17.1",
     "morgan": "^1.10.1",
     "multer": "^2.0.0",
+    "node-telegram-bot-api": "^0.66.0",
     "pdf-lib": "^1.17.1",
     "replicate": "^1.0.1",
     "request": "^2.88.2",
