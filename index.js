@@ -123,74 +123,140 @@ app.get('/api/download', async (req,res)=>{
 });
 
 // --- API: نقطة النهاية الذكية /chat2 ---
-const sessions = {};
-app.post('/chat2', upload.single('image'), async (req,res)=>{
-  try{
-    const { message, sessionId } = req.body;
-    const imageFile = req.file;
 
-    if(!sessionId) return res.status(400).json({ error:'Session ID is required' });
-    if(!message || message.trim().length===0) return res.status(400).json({ error:'Message text is required' });
+    انا لم اطلب منك تضمينها داخل نقطة النهاية
 
-    const hasImage = !!imageFile;
-    let action='chat';
+// --- دالة تحديد نوع الطلب باستخدام LLM Gemini ---
+async function decideTool(text, hasImage) {
+const prompt = `
+حدد نوع الطلب من التالي بناءً على النص ووجود صورة:
 
-    // تحديد الأداة
-    const promptTool = `
-حدد نوع الطلب بناء على النص ووجود صورة:
-النص: "${message}"
-هل يوجد صورة: ${hasImage?'نعم':'لا'}
+remove-bg (إذا طلب إزالة خلفية وكانت هناك صورة)
+
+edit-image (إذا طلب تعديل الصورة وكانت هناك صورة)
+
+chat (إذا كان طلبًا نصيًا عاديًا)
+
+النص: "${text}"
+هل يوجد صورة: ${hasImage ? 'نعم' : 'لا'}
 النوع:
 `;
-    const model = genAI.getGenerativeModel({ model:'gemini-1.5-pro-latest' });
-    const toolResp = await model.generateContent({ contents:[{ role:'user', parts:[{ text:promptTool }] }] });
-    const tool = toolResp.response.text().toLowerCase();
-    if((tool.includes('remove-bg')||tool.includes('remove background')) && hasImage) action='remove-bg';
-    else if((tool.includes('edit-image')||tool.includes('edit image')) && hasImage) action='edit-image';
 
-    if(action==='remove-bg'){
-      const form = new FormData();
-      form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
-      const removeResp = await axios.post('https://api.remove.bg/v1.0/removebg', form,{
-        headers:{ ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
-        responseType:'arraybuffer'
-      });
-      return res.json({ action, imageBase64: removeResp.data.toString('base64') });
-    }
-
-    if(action==='edit-image'){
-      const processedBuffer = await sharp(imageFile.buffer)
-        .resize({ width:1024, height:1024, fit:'contain', background:{r:255,g:255,b:255} })
-        .png().toBuffer();
-
-      const formData = new FormData();
-      formData.append('init_image', processedBuffer, { filename:'image.png', contentType:'image/png' });
-      formData.append('text_prompts[0][text]', message);
-      formData.append('cfg_scale', 7);
-      formData.append('steps', 30);
-
-      const response = await axios.post(
-        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-        formData, { headers:{ Authorization:`Bearer ${process.env.STABILITY_API_KEY}`, ...formData.getHeaders() }, maxBodyLength:Infinity }
-      );
-
-      return res.json({ action, imageBase64: response.data.artifacts[0].base64 });
-    }
-
-    // دردشة نصية
-    if(!sessions[sessionId]) sessions[sessionId]=[];
-    sessions[sessionId].push({ role:'user', parts:[{ text:message }] });
-    const result = await model.generateContent({ contents:sessions[sessionId] });
-    const reply = result.response.text();
-    sessions[sessionId].push({ role:'model', parts:[{ text:reply }] });
-
-    res.json({ action:'chat', reply });
-
-  }catch(err){
-    console.error(err);
-    res.status(500).json({ error:err.message });
-  }
+try {
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+const response = await model.generateContent({
+contents: [{ role: 'user', parts: [{ text: prompt }] }]
 });
+
+const tool = response.response.text().trim().toLowerCase();
+if (tool.includes('remove-bg') || tool.includes('remove background')) return 'remove-bg';
+if (tool.includes('edit-image') || tool.includes('edit image')) return 'edit-image';
+return 'chat';
+
+} catch (error) {
+console.error('خطأ في تحديد الأداة:', error);
+return 'chat';
+}
+}
+
+// --- نقطة النهاية الموحدة الذكية: /chat2 ---
+const sessions = {};
+const upload4 = multer({ storage: multer.memoryStorage() });
+
+app.post('/chat2', upload4.single('image'), async (req, res) => {
+try {
+const { message, sessionId } = req.body;
+const imageFile = req.file;
+
+console.log('Received request:', {
+headers: req.headers,
+body: req.body,
+file: !!imageFile
+});
+
+if (!sessionId) return res.status(400).json({ error: "Session ID is required" });
+if (!message || message.trim().length === 0) return res.status(400).json({ error: "Message text is required" });
+
+const action = await decideTool(message, !!imageFile);
+
+if (action === 'remove-bg' && imageFile) {
+// حذف الخلفية
+const form = new FormData();
+form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
+const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
+headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
+responseType: 'arraybuffer',
+});
+
+return res.json({
+action: 'remove-bg',
+imageBase64: removeBgResponse.data.toString('base64'),
+message: "Background removed successfully"
+});
+
+} else if (action === 'edit-image' && imageFile) {
+// إعادة تحجيم الصورة مع الحفاظ على المحتوى الكامل
+const processedBuffer = await sharp(imageFile.buffer)
+.resize({
+width: 1024,
+height: 1024,
+fit: 'contain',
+background: { r: 255, g: 255, b: 255 } // يمكن تغييره حسب الحاجة
+})
+.png()
+.toBuffer();
+
+// تجهيز formData للـ Stability AI
+const formData = new FormData();
+formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
+formData.append('text_prompts[0][text]', message);
+formData.append('cfg_scale', 7);
+formData.append('clip_guidance_preset', 'FAST_BLUE');
+formData.append('steps', 30);
+
+const response = await axios.post(
+'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+formData,
+{
+headers: {
+Authorization: Bearer ${process.env.STABILITY_API_KEY},
+Accept: 'application/json',
+...formData.getHeaders()
+},
+maxBodyLength: Infinity
+}
+);
+
+return res.json({
+action: 'edit-image',
+imageBase64: response.data.artifacts[0].base64,
+message: "Image edited successfully"
+});
+
+} else {
+// دردشة نصية
+if (!sessions[sessionId]) sessions[sessionId] = [];
+sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
+
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+const result = await model.generateContent({ contents: sessions[sessionId] });
+const reply = result.response.text();
+sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
+
+return res.json({ action: 'chat', reply });
+}
+
+} catch (error) {
+console.error("Error processing request:", error);
+console.error("Status:", error.response?.status);
+console.error("Data:", error.response?.data);
+console.error("Headers:", error.response?.headers);
+
+return res.status(500).json({ error: "Internal server error" });
+
+}
+});
+
 
 // ================== Telegram Webhook ==================
 const WEBHOOK_URL = `https://keytele.onrender.com/webhook/${token}`;
