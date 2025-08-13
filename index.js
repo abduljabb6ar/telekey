@@ -1,5 +1,5 @@
 require("dotenv").config();
-var express = require('express');
+const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const axios = require('axios');
@@ -18,7 +18,7 @@ const TelegramBot = require('node-telegram-bot-api');
 
 // ================== Telegram Setup ==================
 const token = process.env.TEL_TOKEN;
-const bot = new TelegramBot(token, { polling: false }); // ✅ Webhook mode
+const bot = new TelegramBot(token, { polling: false }); // Webhook mode
 
 const app = express();
 app.use(cors());
@@ -136,11 +136,10 @@ app.get('/api/download', async (req, res) => {
   }
 });
 
-// باقي الـ APIs: edit-image, remove-bg, detect-text, detect-labels, chat2
-// انسخهم من كودك القديم كما هي تماماً هنا
+// ضع باقي APIs مثل edit-image, remove-bg, detect-text, detect-labels, chat2 هنا كما في كودك السابق
 
 // ================== Telegram Webhook ==================
-const WEBHOOK_URL = `https://your-app-name.onrender.com/webhook/${token}`; // ⚠️ غيّر your-app-name
+const WEBHOOK_URL = `https://keytele.onrender.com/webhook/${token}`;
 bot.setWebHook(WEBHOOK_URL);
 
 app.post(`/webhook/${token}`, (req, res) => {
@@ -167,7 +166,7 @@ bot.on('message', async (msg) => {
       formData.append('message', msg.caption || '');
       formData.append('sessionId', chatId.toString());
 
-      const response = await axios.post(`https://your-app-name.onrender.com/chat2`, formData, { headers: formData.getHeaders() });
+      const response = await axios.post(`https://keytele.onrender.com/chat2`, formData, { headers: formData.getHeaders() });
       clearInterval(typingInterval);
 
       if (response.data.action === 'edit-image' || response.data.action === 'remove-bg') {
@@ -177,7 +176,7 @@ bot.on('message', async (msg) => {
       }
 
     } else if (msg.text) {
-      const response = await axios.post(`https://your-app-name.onrender.com/chat2`, { message: msg.text, sessionId: chatId.toString() });
+      const response = await axios.post(`https://keytele.onrender.com/chat2`, { message: msg.text, sessionId: chatId.toString() });
       clearInterval(typingInterval);
 
       if (response.data.reply) await bot.sendMessage(chatId, response.data.reply);
