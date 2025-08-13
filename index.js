@@ -217,7 +217,7 @@ const response = await axios.post(
 formData,
 {
 headers: {
-Authorization: Bearer ${process.env.STABILITY_API_KEY},
+Authorization: `Bearer ${process.env.STABILITY_API_KEY}`,
 Accept: 'application/json',
 ...formData.getHeaders()
 },
