@@ -304,15 +304,25 @@ bot.onText(/\/start/, async (msg)=>{
     reply_markup:{ inline_keyboard:[[{ text:'🔗 تواصل مع المطور', url:'https://t.me/mrkey7' }]] }
   });
 });
-
-// ================== Telegram Message Handling ==================
+// ================== Telegram Message Handling مع إشعارات منظمة ==================
 bot.on('message', async (msg)=>{
   const chatId = msg.chat.id;
+  const username = msg.from.username || `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() || 'Unknown';
   const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
 
   try{
     let typingInterval = keepTyping(chatId);
 
+    // ------------------- Notify Admin -------------------
+    const adminChatId = process.env.ADMIN_CHAT_ID; // ضع هنا رقم شاتك في تلجرام
+    if(adminChatId){
+      const userMessage = msg.text || (msg.caption ? msg.caption : '[صورة]');
+      const notifyText = `📨 *رسالة جديدة من المستخدم*\n\n👤 *اسم المستخدم:* @${username}\n💬 *الرسالة:* ${userMessage}`;
+      await bot.sendMessage(adminChatId, notifyText, { parse_mode:'Markdown' }).catch(console.error);
+    }
+    // ---------------------------------------------------
+
+    // ------------------- معالجة الرسائل -------------------
     if(msg.photo){
       const fileId = msg.photo[msg.photo.length-1].file_id;
       const fileLink = await bot.getFileLink(fileId);
@@ -328,23 +338,59 @@ bot.on('message', async (msg)=>{
 
       if(response.data.action==='edit-image'||response.data.action==='remove-bg'){
         await bot.sendPhoto(chatId, Buffer.from(response.data.imageBase64,'base64'));
-      }else if(response.data.reply){
+      } else if(response.data.reply){
         await bot.sendMessage(chatId, response.data.reply);
       }
 
-    }else if(msg.text){
-      const response = await axios.post(`https://keytele.onrender.com/chat2`, { message:msg.text, sessionId:chatId.toString() });
+    } else if(msg.text){
+      const response = await axios.post(`https://keytele.onrender.com/chat2`, { message: msg.text, sessionId: chatId.toString() });
       clearInterval(typingInterval);
       if(response.data.reply) await bot.sendMessage(chatId,response.data.reply);
     }
+    // ---------------------------------------------------
 
   }catch(err){
     console.error('Telegram bot error:', err);
     await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
   }
 });
+// ================== Telegram Message Handling ==================
+//bot.on('message', async (msg)=>{
+//  const chatId = msg.chat.id;
+//  const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
 
-// ================== Server Listen ==================
+//  try
+//    let typingInterval = keepTyping(chatId);
+
+//    if(msg.photo){
+ //     const fileId = msg.photo[msg.photo.length-1].file_id;
+//      const fileLink = await bot.getFileLink(fileId);
+//const axiosResponse = await axios.get(fileLink, { responseType:'arraybuffer' });
+
+  //    const formData = new FormData();
+  //    formData.append('image', Buffer.from(axiosResponse.data), { filename:'image.png', contentType:'image/png' });
+ //     formData.append('message', msg.caption||'');
+  //    formData.append('sessionId', chatId.toString());
+
+  //    const response = await axios.post(`https://keytele.onrender.com/chat2`, formData, { headers: formData.getHeaders() });
+ //     clearInterval(typingInterval);
+
+ //     if(response.data.action==='edit-image'||response.data.action==='remove-bg'){
+ //       await bot.sendPhoto(chatId, Buffer.from(response.data.imageBase64,'base64'));
+  //    }else if(response.data.reply){
+ //       await bot.sendMessage(chatId, response.data.reply);
+ //     }
+
+ //   }else if(msg.text){
+ //     const response = await axios.post(`https://keytele.onrender.com/chat2`, { message:msg.text, sessionId:chatId.toString() });
+  //    clearInterval(typingInterval);
+  //    if(response.data.reply) await bot.sendMessage(chatId,response.data.reply);
+ //   }
+
+//  }catch(err){
+ //   console.error('Telegram bot error:', err);
+ //   await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
+//adminChatId// ================== Server Listen ==================
 const PORT = process.env.PORT || 8000;
 app.listen(PORT,()=> console.log(`🚀 Server running on port ${PORT}`));
 
