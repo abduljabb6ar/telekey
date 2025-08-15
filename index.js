@@ -182,7 +182,7 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 });
 
 // ================== Telegram Webhook ==================
-const WEBHOOK_URL = `${process.env.BASE_URL}/webhook`;
+const WEBHOOK_URL = `https://keytele.onrender.com/webhook`;
 bot.setWebHook(WEBHOOK_URL);
 
 app.post('/webhook', (req, res) => {
@@ -204,7 +204,7 @@ bot.on('message', async (msg) => {
       const audioBase64 = Buffer.from(response.data).toString('base64');
       
       const apiResponse = await axios.post(
-        `${process.env.BASE_URL}/api/speech-to-voice`,
+        `https://keytele.onrender.com/api/speech-to-voice`,
         { audio: audioBase64, sessionId: chatId.toString() },
         { responseType: 'arraybuffer' }
       );
