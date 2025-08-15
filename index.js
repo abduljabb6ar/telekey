@@ -250,11 +250,14 @@ bot.onText(/\/start/, async (msg)=>{
 // ================== Telegram Message Handling مع الصوت ==================
 bot.on('message', async (msg)=>{
   const chatId = msg.chat.id;
+  const username = msg.from.username || `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() || 'Unknown';
+  let typingInterval; // ⚠️ تعريف خارج try لضمان الوصول له
   const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
 
   try{
-    let typingInterval = keepTyping(chatId);
+    typingInterval = keepTyping(chatId);
 
+    // ------------------- معالجة الرسائل الصوتية -------------------
     if(msg.voice){ 
       const fileId = msg.voice.file_id;
       const fileLink = await bot.getFileLink(fileId);
@@ -265,8 +268,7 @@ bot.on('message', async (msg)=>{
         config: {
           encoding: 'OGG_OPUS',
           sampleRateHertz: 48000,
-          // التعرف التلقائي على العربية والإنجليزية
-          alternativeLanguageCodes: ['ar-SA','en-US'],
+          languageCode: 'ar-SA', // يمكن تغييره أو جعله ديناميكي
         },
       });
 
@@ -289,6 +291,7 @@ bot.on('message', async (msg)=>{
       clearInterval(typingInterval);
       await bot.sendVoice(chatId, ttsResponse.data);
 
+    // ------------------- معالجة الصور -------------------
     } else if(msg.photo){
       const fileId = msg.photo[msg.photo.length-1].file_id;
       const fileLink = await bot.getFileLink(fileId);
@@ -308,17 +311,20 @@ bot.on('message', async (msg)=>{
         await bot.sendMessage(chatId, response.data.reply);
       }
 
+    // ------------------- معالجة النصوص -------------------
     } else if(msg.text){
       const response = await axios.post(`https://keytele.onrender.com/chat2`, { message: msg.text, sessionId: chatId.toString() });
       clearInterval(typingInterval);
       if(response.data.reply) await bot.sendMessage(chatId,response.data.reply);
     }
 
-  }catch(err){
-    clearInterval(typingInterval);
+  } catch(err){
+    if(typingInterval) clearInterval(typingInterval); // ✅ تحقق من وجود المتغير قبل مسحه
+    console.error('Telegram bot error:', err);
     await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
   }
 });
+
 
 // ================== Server Listen ==================
 const PORT = process.env.PORT || 8000;
