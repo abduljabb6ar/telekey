@@ -295,8 +295,6 @@ bot.on('message', async (msg)=>{
     await bot.sendMessage(chatId, reply);
   }
 }
-;
-
     // ------------------- معالجة الصور -------------------
     } else if(msg.photo){
       const fileId = msg.photo[msg.photo.length-1].file_id;
