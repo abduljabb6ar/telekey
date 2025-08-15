@@ -259,37 +259,43 @@ bot.on('message', async (msg)=>{
 
     // ------------------- معالجة الرسائل الصوتية -------------------
     if(msg.voice){ 
-      const fileId = msg.voice.file_id;
-      const fileLink = await bot.getFileLink(fileId);
-      const audioResponse = await axios.get(fileLink, { responseType: 'arraybuffer' });
+  const fileId = msg.voice.file_id;
+  const fileLink = await bot.getFileLink(fileId);
+  const audioResponse = await axios.get(fileLink, { responseType: 'arraybuffer' });
 
-      const [sttResponse] = await speechClient.recognize({
-        audio: { content: Buffer.from(audioResponse.data).toString('base64') },
-        config: {
-          encoding: 'OGG_OPUS',
-          sampleRateHertz: 48000,
-          languageCode: 'ar-SA', // يمكن تغييره أو جعله ديناميكي
-        },
-      });
+  const [sttResponse] = await speechClient.recognize({
+    audio: { content: Buffer.from(audioResponse.data).toString('base64') },
+    config: {
+      encoding: 'OGG_OPUS',
+      sampleRateHertz: 48000,
+      languageCode: 'ar-SA',
+    },
+  });
 
-      const transcription = sttResponse.results.map(r => r.alternatives[0].transcript).join('\n');
+  const transcription = sttResponse.results.map(r => r.alternatives[0].transcript).join('\n');
 
-      if (!sessions2[chatId]) sessions2[chatId] = [];
-      sessions2[chatId].push({ role: 'user', parts: [{ text: transcription }] });
+  if (!sessions2[chatId]) sessions2[chatId] = [];
+  sessions2[chatId].push({ role: 'user', parts: [{ text: transcription }] });
 
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
-      const result = await model.generateContent({ contents: sessions2[chatId] });
-      const reply = result.response.text();
-      sessions2[chatId].push({ role: 'model', parts: [{ text: reply }] });
+  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
+  const result = await model.generateContent({ contents: sessions2[chatId] });
+  const reply = result.response.text();
+  sessions2[chatId].push({ role: 'model', parts: [{ text: reply }] });
 
-      const ttsResponse = await axios.post(
-        `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE || '9BWtsMINqrJLrRacOk9x'}`,
-        { text: reply, voice_settings: { stability: 0.5, similarity_boost: 0.5 } },
-        { headers: { 'xi-api-key': process.env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'accept': 'audio/mpeg' }, responseType: 'arraybuffer' }
-      );
-
-      clearInterval(typingInterval);
-      await bot.sendVoice(chatId, ttsResponse.data);
+  try {
+    const ttsResponse = await axios.post(
+      `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE || '9BWtsMINqrJLrRacOk9x'}`,
+      { text: reply, voice_settings: { stability: 0.5, similarity_boost: 0.5 } },
+      { headers: { 'xi-api-key': process.env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'accept': 'audio/mpeg' }, responseType: 'arraybuffer' }
+    );
+    await bot.sendVoice(chatId, ttsResponse.data);
+  } catch (err) {
+    console.error('خطأ في تحويل النص إلى صوت:', err.message);
+    // إرسال الرد كنص بدلاً من الصوت عند حدوث الخطأ
+    await bot.sendMessage(chatId, reply);
+  }
+}
+;
 
     // ------------------- معالجة الصور -------------------
     } else if(msg.photo){
