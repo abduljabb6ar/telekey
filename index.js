@@ -1,3 +1,5 @@
+
+
 require("dotenv").config();
 const express = require('express');
 const cors = require('cors');
@@ -16,7 +18,6 @@ const rateLimit = require('express-rate-limit');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const TelegramBot = require('node-telegram-bot-api');
 const { ImageAnnotatorClient } = require('@google-cloud/vision').v1;
-const speech = require('@google-cloud/speech'); // لإضافة التعرف على الكلام
 
 // ================== Telegram Setup ==================
 const token = process.env.TEL_TOKEN;
@@ -40,11 +41,6 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // 📌 Google Vision
 const visionClient = new ImageAnnotatorClient({ keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS) });
-
-// 📌 Google Speech-to-Text Client
-const speechClient = new speech.SpeechClient({
-  credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
-});
 
 // 📌 Helper: تنفيذ أوامر
 function execAsync(command) {
@@ -125,9 +121,12 @@ app.get('/api/download', async (req,res)=>{
   } catch(err){ res.status(500).json({ error:'Server error' }); }
 });
 
+// --- API: نقطة النهاية الذكية /chat2 ---
+
+  
 // --- دالة تحديد نوع الطلب باستخدام LLM Gemini ---
 async function decideTool(text, hasImage) {
-  const prompt = `
+const prompt = `
 حدد نوع الطلب من التالي بناءً على النص ووجود صورة:
 
 remove-bg (إذا طلب إزالة خلفية وكانت هناك صورة)
@@ -140,92 +139,122 @@ chat (إذا كان طلبًا نصيًا عاديًا)
 هل يوجد صورة: ${hasImage ? 'نعم' : 'لا'}
 النوع:
 `;
-  try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
-    const response = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }]
-    });
 
-    const tool = response.response.text().trim().toLowerCase();
-    if (tool.includes('remove-bg') || tool.includes('remove background')) return 'remove-bg';
-    if (tool.includes('edit-image') || tool.includes('edit image')) return 'edit-image';
-    return 'chat';
-  } catch (error) {
-    console.error('خطأ في تحديد الأداة:', error);
-    return 'chat';
-  }
+try {
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+const response = await model.generateContent({
+contents: [{ role: 'user', parts: [{ text: prompt }] }]
+});
+
+const tool = response.response.text().trim().toLowerCase();
+if (tool.includes('remove-bg') || tool.includes('remove background')) return 'remove-bg';
+if (tool.includes('edit-image') || tool.includes('edit image')) return 'edit-image';
+return 'chat';
+
+} catch (error) {
+console.error('خطأ في تحديد الأداة:', error);
+return 'chat';
+}
 }
 
 // --- نقطة النهاية الموحدة الذكية: /chat2 ---
 const sessions = {};
-const sessions2 = {}; // لجلسات الصوت
 const upload4 = multer({ storage: multer.memoryStorage() });
 
 app.post('/chat2', upload4.single('image'), async (req, res) => {
-  try {
-    const { message, sessionId } = req.body;
-    const imageFile = req.file;
+try {
+const { message, sessionId } = req.body;
+const imageFile = req.file;
 
-    if (!sessionId) return res.status(400).json({ error: "Session ID is required" });
-    if (!message || message.trim().length === 0) return res.status(400).json({ error: "Message text is required" });
-
-    const action = await decideTool(message, !!imageFile);
-
-    if (action === 'remove-bg' && imageFile) {
-      const form = new FormData();
-      form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
-      const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
-        headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
-        responseType: 'arraybuffer',
-      });
-
-      return res.json({
-        action: 'remove-bg',
-        imageBase64: removeBgResponse.data.toString('base64'),
-        message: "Background removed successfully"
-      });
-
-    } else if (action === 'edit-image' && imageFile) {
-      const processedBuffer = await sharp(imageFile.buffer)
-        .resize({ width: 1024, height: 1024, fit: 'contain', background: { r: 255, g: 255, b: 255 } })
-        .png()
-        .toBuffer();
-
-      const formData = new FormData();
-      formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
-      formData.append('text_prompts[0][text]', message);
-      formData.append('cfg_scale', 7);
-      formData.append('clip_guidance_preset', 'FAST_BLUE');
-      formData.append('steps', 30);
-
-      const response = await axios.post(
-        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-        formData,
-        { headers: { Authorization: `Bearer ${process.env.STABILITY_API_KEY}`, Accept: 'application/json', ...formData.getHeaders() }, maxBodyLength: Infinity }
-      );
-
-      return res.json({
-        action: 'edit-image',
-        imageBase64: response.data.artifacts[0].base64,
-        message: "Image edited successfully"
-      });
-
-    } else {
-      if (!sessions[sessionId]) sessions[sessionId] = [];
-      sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
-
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
-      const result = await model.generateContent({ contents: sessions[sessionId] });
-      const reply = result.response.text();
-      sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
-
-      return res.json({ action: 'chat', reply });
-    }
-
-  } catch (error) {
-    return res.status(500).json({ error: "Internal server error" });
-  }
+console.log('Received request:', {
+headers: req.headers,
+body: req.body,
+file: !!imageFile
 });
+
+if (!sessionId) return res.status(400).json({ error: "Session ID is required" });
+if (!message || message.trim().length === 0) return res.status(400).json({ error: "Message text is required" });
+
+const action = await decideTool(message, !!imageFile);
+
+if (action === 'remove-bg' && imageFile) {
+// حذف الخلفية
+const form = new FormData();
+form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
+const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
+headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
+responseType: 'arraybuffer',
+});
+
+return res.json({
+action: 'remove-bg',
+imageBase64: removeBgResponse.data.toString('base64'),
+message: "Background removed successfully"
+});
+
+} else if (action === 'edit-image' && imageFile) {
+// إعادة تحجيم الصورة مع الحفاظ على المحتوى الكامل
+const processedBuffer = await sharp(imageFile.buffer)
+.resize({
+width: 1024,
+height: 1024,
+fit: 'contain',
+background: { r: 255, g: 255, b: 255 } // يمكن تغييره حسب الحاجة
+})
+.png()
+.toBuffer();
+
+// تجهيز formData للـ Stability AI
+const formData = new FormData();
+formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
+formData.append('text_prompts[0][text]', message);
+formData.append('cfg_scale', 7);
+formData.append('clip_guidance_preset', 'FAST_BLUE');
+formData.append('steps', 30);
+
+const response = await axios.post(
+'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+formData,
+{
+headers: {
+Authorization: `Bearer ${process.env.STABILITY_API_KEY}`,
+Accept: 'application/json',
+...formData.getHeaders()
+},
+maxBodyLength: Infinity
+}
+);
+
+return res.json({
+action: 'edit-image',
+imageBase64: response.data.artifacts[0].base64,
+message: "Image edited successfully"
+});
+
+} else {
+// دردشة نصية
+if (!sessions[sessionId]) sessions[sessionId] = [];
+sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
+
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+const result = await model.generateContent({ contents: sessions[sessionId] });
+const reply = result.response.text();
+sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
+
+return res.json({ action: 'chat', reply });
+}
+
+} catch (error) {
+console.error("Error processing request:", error);
+console.error("Status:", error.response?.status);
+console.error("Data:", error.response?.data);
+console.error("Headers:", error.response?.headers);
+
+return res.status(500).json({ error: "Internal server error" });
+
+}
+});
+
 
 // ================== Telegram Webhook ==================
 const WEBHOOK_URL = `https://keytele.onrender.com/webhook/${token}`;
@@ -239,64 +268,62 @@ app.post(`/webhook/${token}`, (req,res)=>{
 // ================== Telegram Start Command ==================
 bot.onText(/\/start/, async (msg)=>{
   const chatId = msg.chat.id;
-  const welcomeMessage = `مرحباً بك في بوت *KV* .. 🤖 ...`;
+  const welcomeMessage = `
+مرحباً بك في بوت *KV* .. 🤖
+
+هذا البوت يوفر لك مجموعة من الأدوات الذكية:
+
+1️⃣ **تنزيل الفيديوهات والصوتيات**
+   - احصل على معلومات الفيديو من أي رابط ..
+   - تحميل الفيديو أو الصوت بجودات متعددة ..
+
+2️⃣ **تحرير الصور**
+   - تعديل الصور باستخدام الذكاء الاصطناعي ..
+   - إزالة الخلفية بسهولة ..
+
+3️⃣ **تحليل الصور**
+   - كشف النصوص داخل الصور ..
+   - التعرف على تسميات الأشياء داخل الصورة ..
+
+4️⃣ **دردشة ذكية**
+   - يمكنك التحدث مع البوت مباشرة ..
+   - البوت قادر على فهم أوامر تعديل الصور أو إزالة الخلفية تلقائياً إذا أرسلت صورة مع نص ..
+
+📌 *طريقة الاستخدام:*
+- أرسل رابط الفيديو لتحصل على معلوماته وتحميله ..
+- أرسل صورة مع نص لتعديل الصورة أو إزالة الخلفية ..
+- أرسل أي رسالة نصية لتحدث مع البوت ..
+
+استمتع بالتجربة ..! 🚀
+
+💡 مطور البوت: [mrkey7](https://t.me/mrkey7)
+`;
 
   await bot.sendMessage(chatId, welcomeMessage,{
     parse_mode:'Markdown',
     reply_markup:{ inline_keyboard:[[{ text:'🔗 تواصل مع المطور', url:'https://t.me/mrkey7' }]] }
   });
 });
-
-// ================== Telegram Message Handling مع الصوت ==================
+// ================== Telegram Message Handling مع إشعارات منظمة ==================
 bot.on('message', async (msg)=>{
   const chatId = msg.chat.id;
   const username = msg.from.username || `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() || 'Unknown';
-  let typingInterval; // ⚠️ تعريف خارج try لضمان الوصول له
   const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
 
   try{
-    typingInterval = keepTyping(chatId);
+    let typingInterval = keepTyping(chatId);
 
-    // ------------------- معالجة الرسائل الصوتية -------------------
-    if(msg.voice){ 
-  const fileId = msg.voice.file_id;
-  const fileLink = await bot.getFileLink(fileId);
-  const audioResponse = await axios.get(fileLink, { responseType: 'arraybuffer' });
+    // ------------------- Notify Admin -------------------
+    const adminChatId = process.env.ADMIN_CHAT_ID; // ضع هنا رقم شاتك في تلجرام
+    if(adminChatId){
+      const userMessage = msg.text || (msg.caption ? msg.caption : '[صورة]');
+      const notifyText = `📨 *رسالة جديدة من المستخدم*\n\n👤 *اسم المستخدم:* @${username}\n💬 *الرسالة:* ${userMessage}`;
+      await bot.sendMessage(adminChatId, notifyText, { parse_mode:'Markdown' }).catch(console.error);
+    }
+    // ---------------------------------------------------
 
-  const [sttResponse] = await speechClient.recognize({
-    audio: { content: Buffer.from(audioResponse.data).toString('base64') },
-    config: {
-      encoding: 'OGG_OPUS',
-      sampleRateHertz: 48000,
-      languageCode: 'ar-SA',
-    },
-  });
-
-  const transcription = sttResponse.results.map(r => r.alternatives[0].transcript).join('\n');
-
-  if (!sessions2[chatId]) sessions2[chatId] = [];
-  sessions2[chatId].push({ role: 'user', parts: [{ text: transcription }] });
-
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
-  const result = await model.generateContent({ contents: sessions2[chatId] });
-  const reply = result.response.text();
-  sessions2[chatId].push({ role: 'model', parts: [{ text: reply }] });
-
-  try {
-    const ttsResponse = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE || '9BWtsMINqrJLrRacOk9x'}`,
-      { text: reply, voice_settings: { stability: 0.5, similarity_boost: 0.5 } },
-      { headers: { 'xi-api-key': process.env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'accept': 'audio/mpeg' }, responseType: 'arraybuffer' }
-    );
-    await bot.sendVoice(chatId, ttsResponse.data);
-  } catch (err) {
-    console.error('خطأ في تحويل النص إلى صوت:', err.message);
-    // إرسال الرد كنص بدلاً من الصوت عند حدوث الخطأ
-    await bot.sendMessage(chatId, reply);
-  }
-}
-    // ------------------- معالجة الصور -------------------
-     else if(msg.photo){
+    // ------------------- معالجة الرسائل -------------------
+    if(msg.photo){
       const fileId = msg.photo[msg.photo.length-1].file_id;
       const fileLink = await bot.getFileLink(fileId);
       const axiosResponse = await axios.get(fileLink, { responseType:'arraybuffer' });
@@ -315,20 +342,54 @@ bot.on('message', async (msg)=>{
         await bot.sendMessage(chatId, response.data.reply);
       }
 
-    // ------------------- معالجة النصوص -------------------
     } else if(msg.text){
       const response = await axios.post(`https://keytele.onrender.com/chat2`, { message: msg.text, sessionId: chatId.toString() });
       clearInterval(typingInterval);
       if(response.data.reply) await bot.sendMessage(chatId,response.data.reply);
     }
+    // ---------------------------------------------------
 
-  } catch(err){
-    if(typingInterval) clearInterval(typingInterval); // ✅ تحقق من وجود المتغير قبل مسحه
+  }catch(err){
     console.error('Telegram bot error:', err);
     await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
   }
 });
+// ================== Telegram Message Handling ==================
+//bot.on('message', async (msg)=>{
+//  const chatId = msg.chat.id;
+//  const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
 
+//  try
+//    let typingInterval = keepTyping(chatId);
+
+//    if(msg.photo){
+ //     const fileId = msg.photo[msg.photo.length-1].file_id;
+//      const fileLink = await bot.getFileLink(fileId);
+//const axiosResponse = await axios.get(fileLink, { responseType:'arraybuffer' });
+
+  //    const formData = new FormData();
+  //    formData.append('image', Buffer.from(axiosResponse.data), { filename:'image.png', contentType:'image/png' });
+ //     formData.append('message', msg.caption||'');
+  //    formData.append('sessionId', chatId.toString());
+
+  //    const response = await axios.post(`https://keytele.onrender.com/chat2`, formData, { headers: formData.getHeaders() });
+ //     clearInterval(typingInterval);
+
+ //     if(response.data.action==='edit-image'||response.data.action==='remove-bg'){
+ //       await bot.sendPhoto(chatId, Buffer.from(response.data.imageBase64,'base64'));
+  //    }else if(response.data.reply){
+ //       await bot.sendMessage(chatId, response.data.reply);
+ //     }
+
+ //   }else if(msg.text){
+ //     const response = await axios.post(`https://keytele.onrender.com/chat2`, { message:msg.text, sessionId:chatId.toString() });
+  //    clearInterval(typingInterval);
+  //    if(response.data.reply) await bot.sendMessage(chatId,response.data.reply);
+ //   }
+
+//  }catch(err){
+ //   console.error('Telegram bot error:', err);
+ //   await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
 
 // ================== Server Listen ==================
 const PORT = process.env.PORT || 8000;
