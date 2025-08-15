@@ -16,7 +16,7 @@ const rateLimit = require('express-rate-limit');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const TelegramBot = require('node-telegram-bot-api');
 const { ImageAnnotatorClient } = require('@google-cloud/vision').v1;
-const speech = require('@google-cloud/speech');
+const {SpeechClient} = require('@google-cloud/speech');
 
 // ================== Telegram Setup ==================
 const token = process.env.TEL_TOKEN;
@@ -42,8 +42,12 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const visionClient = new ImageAnnotatorClient({ keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS) });
 
 // 📌 Google Speech Client
-const client = new speech.SpeechClient({
-  keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS)
+const client = new SpeechClient({
+  credentials: {
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    project_id: process.env.GOOGLE_PROJECT_ID
+  }
 });
 
 // جلسات المحادثة الصوتية
@@ -55,7 +59,7 @@ const ytDlpPath = `"C:\\Users\\Computer\\AppData\\Roaming\\Python\\Python312\\Sc
 // --- API: تحويل الصوت إلى صوت ---
 app.post('/api/speech-to-voice', async (req, res) => {
   try {
-    const audioBytes = req.body.audio;
+     const audioBytes = req.body.audio;
     const voiceId = req.body.voiceId || '9BWtsMINqrJLrRacOk9x';
     const sessionId = req.body.sessionId || 'default-session';
 
@@ -66,9 +70,8 @@ app.post('/api/speech-to-voice', async (req, res) => {
         encoding: 'WEBM_OPUS',
         sampleRateHertz: 48000,
         languageCode: 'ar-SA',
-      },
+      }
     });
-
     const transcription = response.results
       .map(result => result.alternatives[0].transcript)
       .join('\n');
