@@ -127,7 +127,7 @@ app.get('/api/download', async (req,res)=>{
 
 // --- دالة تحديد نوع الطلب باستخدام LLM Gemini ---
 async function decideTool(text, hasImage) {
-const prompt = `
+  const prompt = `
 حدد نوع الطلب من التالي بناءً على النص ووجود صورة:
 
 remove-bg (إذا طلب إزالة خلفية وكانت هناك صورة)
@@ -140,22 +140,20 @@ chat (إذا كان طلبًا نصيًا عاديًا)
 هل يوجد صورة: ${hasImage ? 'نعم' : 'لا'}
 النوع:
 `;
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+    const response = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }]
+    });
 
-try {
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
-const response = await model.generateContent({
-contents: [{ role: 'user', parts: [{ text: prompt }] }]
-});
-
-const tool = response.response.text().trim().toLowerCase();
-if (tool.includes('remove-bg') || tool.includes('remove background')) return 'remove-bg';
-if (tool.includes('edit-image') || tool.includes('edit image')) return 'edit-image';
-return 'chat';
-
-} catch (error) {
-console.error('خطأ في تحديد الأداة:', error);
-return 'chat';
-}
+    const tool = response.response.text().trim().toLowerCase();
+    if (tool.includes('remove-bg') || tool.includes('remove background')) return 'remove-bg';
+    if (tool.includes('edit-image') || tool.includes('edit image')) return 'edit-image';
+    return 'chat';
+  } catch (error) {
+    console.error('خطأ في تحديد الأداة:', error);
+    return 'chat';
+  }
 }
 
 // --- نقطة النهاية الموحدة الذكية: /chat2 ---
@@ -164,81 +162,69 @@ const sessions2 = {}; // لجلسات الصوت
 const upload4 = multer({ storage: multer.memoryStorage() });
 
 app.post('/chat2', upload4.single('image'), async (req, res) => {
-try {
-const { message, sessionId } = req.body;
-const imageFile = req.file;
+  try {
+    const { message, sessionId } = req.body;
+    const imageFile = req.file;
 
-if (!sessionId) return res.status(400).json({ error: "Session ID is required" });
-if (!message || message.trim().length === 0) return res.status(400).json({ error: "Message text is required" });
+    if (!sessionId) return res.status(400).json({ error: "Session ID is required" });
+    if (!message || message.trim().length === 0) return res.status(400).json({ error: "Message text is required" });
 
-const action = await decideTool(message, !!imageFile);
+    const action = await decideTool(message, !!imageFile);
 
-if (action === 'remove-bg' && imageFile) {
-const form = new FormData();
-form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
-const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
-headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
-responseType: 'arraybuffer',
-});
+    if (action === 'remove-bg' && imageFile) {
+      const form = new FormData();
+      form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
+      const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
+        headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
+        responseType: 'arraybuffer',
+      });
 
-return res.json({
-action: 'remove-bg',
-imageBase64: removeBgResponse.data.toString('base64'),
-message: "Background removed successfully"
-});
+      return res.json({
+        action: 'remove-bg',
+        imageBase64: removeBgResponse.data.toString('base64'),
+        message: "Background removed successfully"
+      });
 
-} else if (action === 'edit-image' && imageFile) {
-const processedBuffer = await sharp(imageFile.buffer)
-.resize({
-width: 1024,
-height: 1024,
-fit: 'contain',
-background: { r: 255, g: 255, b: 255 }
-})
-.png()
-.toBuffer();
+    } else if (action === 'edit-image' && imageFile) {
+      const processedBuffer = await sharp(imageFile.buffer)
+        .resize({ width: 1024, height: 1024, fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+        .png()
+        .toBuffer();
 
-const formData = new FormData();
-formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
-formData.append('text_prompts[0][text]', message);
-formData.append('cfg_scale', 7);
-formData.append('clip_guidance_preset', 'FAST_BLUE');
-formData.append('steps', 30);
+      const formData = new FormData();
+      formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
+      formData.append('text_prompts[0][text]', message);
+      formData.append('cfg_scale', 7);
+      formData.append('clip_guidance_preset', 'FAST_BLUE');
+      formData.append('steps', 30);
 
-const response = await axios.post(
-'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-formData,
-{
-headers: {
-Authorization: `Bearer ${process.env.STABILITY_API_KEY}`,
-Accept: 'application/json',
-...formData.getHeaders()
-},
-maxBodyLength: Infinity
-}
-);
+      const response = await axios.post(
+        'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
+        formData,
+        { headers: { Authorization: `Bearer ${process.env.STABILITY_API_KEY}`, Accept: 'application/json', ...formData.getHeaders() }, maxBodyLength: Infinity }
+      );
 
-return res.json({
-action: 'edit-image',
-imageBase64: response.data.artifacts[0].base64,
-message: "Image edited successfully"
-});
+      return res.json({
+        action: 'edit-image',
+        imageBase64: response.data.artifacts[0].base64,
+        message: "Image edited successfully"
+      });
 
-} else {
-if (!sessions[sessionId]) sessions[sessionId] = [];
-sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
+    } else {
+      if (!sessions[sessionId]) sessions[sessionId] = [];
+      sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
 
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
-const result = await model.generateContent({ contents: sessions[sessionId] });
-const reply = result.response.text();
-sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
+      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+      const result = await model.generateContent({ contents: sessions[sessionId] });
+      const reply = result.response.text();
+      sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
 
-return res.json({ action: 'chat', reply });
-}
+      return res.json({ action: 'chat', reply });
+    }
 
-} catch (error) {
-return res.status(500).json({ error: "Internal server error" });
-}
+  } catch (error) {
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // ================== Telegram Webhook ==================
@@ -264,7 +250,6 @@ bot.onText(/\/start/, async (msg)=>{
 // ================== Telegram Message Handling مع الصوت ==================
 bot.on('message', async (msg)=>{
   const chatId = msg.chat.id;
-  const username = msg.from.username || `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() || 'Unknown';
   const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
 
   try{
@@ -280,7 +265,8 @@ bot.on('message', async (msg)=>{
         config: {
           encoding: 'OGG_OPUS',
           sampleRateHertz: 48000,
-          languageCode: 'ar-SA',
+          // التعرف التلقائي على العربية والإنجليزية
+          alternativeLanguageCodes: ['ar-SA','en-US'],
         },
       });
 
@@ -329,6 +315,7 @@ bot.on('message', async (msg)=>{
     }
 
   }catch(err){
+    clearInterval(typingInterval);
     await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
   }
 });
