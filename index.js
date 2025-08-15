@@ -4,45 +4,25 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
 const FormData = require('form-data');
 const sharp = require('sharp');
 const { exec } = require('child_process');
-const https = require('https');
-const http = require('http');
-const url = require('url');
-const rateLimit = require('express-rate-limit');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const TelegramBot = require('node-telegram-bot-api');
+const { SpeechClient } = require('@google-cloud/speech');
 const { ImageAnnotatorClient } = require('@google-cloud/vision').v1;
-const {SpeechClient} = require('@google-cloud/speech');
 
-// ================== Telegram Setup ==================
-const token = process.env.TEL_TOKEN;
-const bot = new TelegramBot(token, { polling: false }); // Webhook mode
-
+// ================== تهيئة التطبيق ==================
 const app = express();
 app.use(cors());
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-// 📌 Rate Limit
-const limiter = rateLimit({ windowMs: 15*60*1000, max: 100 });
-app.use(limiter);
-
-// 📌 Multer
-const upload = multer({ storage: multer.memoryStorage() });
-
-// 📌 Google Generative AI
+// ================== تهيئة العملاء ==================
+const bot = new TelegramBot(process.env.TEL_TOKEN, { polling: false });
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// 📌 Google Vision
-const visionClient = new ImageAnnotatorClient({ keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS) });
-
-// 📌 Google Speech Client
-const client = new SpeechClient({
+const speechClient = new SpeechClient({
   credentials: {
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
     private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
@@ -50,433 +30,229 @@ const client = new SpeechClient({
   }
 });
 
-// جلسات المحادثة الصوتية
-const sessions2 = {};
+const visionClient = new ImageAnnotatorClient({
+  credentials: {
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    project_id: process.env.GOOGLE_PROJECT_ID
+  }
+});
 
-// ================== APIs ==================
-const ytDlpPath = `"C:\\Users\\Computer\\AppData\\Roaming\\Python\\Python312\\Scripts\\yt-dlp.exe"`;
+// ================== جلسات المحادثة ==================
+const textSessions = {};
+const voiceSessions = {};
 
-// --- API: تحويل الصوت إلى صوت ---
+// ================== نقاط النهاية ==================
+
+// 1. تحويل الصوت إلى صوت
 app.post('/api/speech-to-voice', async (req, res) => {
   try {
-     const audioBytes = req.body.audio;
-    const voiceId = req.body.voiceId || '9BWtsMINqrJLrRacOk9x';
-    const sessionId = req.body.sessionId || 'default-session';
+    const { audio, voiceId = '9BWtsMINqrJLrRacOk9x', sessionId = 'default' } = req.body;
 
-    // 1. تحويل الصوت إلى نص
-    const [response] = await client.recognize({
-      audio: { content: audioBytes },
+    if (!audio) {
+      return res.status(400).json({ error: 'لم يتم تقديم بيانات صوتية' });
+    }
+
+    // تحويل الصوت إلى نص
+    const [speechResponse] = await speechClient.recognize({
+      audio: { content: audio },
       config: {
-        encoding: 'WEBM_OPUS',
+        encoding: 'OGG_OPUS',
         sampleRateHertz: 48000,
         languageCode: 'ar-SA',
       }
     });
-    const transcription = response.results
-      .map(result => result.alternatives[0].transcript)
-      .join('\n');
 
-    console.log('🎤 Transcription:', transcription);
+    const transcription = speechResponse.results
+      .map(result => result.alternatives[0]?.transcript || '')
+      .join('\n')
+      .trim();
 
-    // 2. إعداد جلسة Gemini
-    if (!sessions2[sessionId]) sessions2[sessionId] = [];
-
-    sessions2[sessionId].push({
-      role: 'user',
-      parts: [{ text: transcription }]
-    });
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-
-    const result = await model.generateContent({
-      contents: sessions2[sessionId]
-    });
-
-    const reply = result.response.text();
-    console.log('💬 Gemini Reply:', reply);
-
-    sessions2[sessionId].push({
-      role: 'model',
-      parts: [{ text: reply }]
-    });
-
-    // 3. تحويل النص إلى صوت باستخدام ElevenLabs
-    let audioData;
-    let contentType = 'audio/mpeg';
-
-    try {
-      const ttsResponse = await axios.post(
-        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-        {
-          text: reply,
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.5
-          }
-        },
-        {
-          headers: {
-            'xi-api-key': process.env.ELEVENLABS_KEY,
-            'Content-Type': 'application/json',
-            'accept': 'audio/mpeg'
-          },
-          responseType: 'arraybuffer',
-          timeout: 15000
-        }
-      );
-
-      audioData = ttsResponse.data;
-    } catch (ttsError) {
-      console.error('🔁 ElevenLabs TTS failed:', ttsError.message);
-      throw new Error('تحويل النص إلى صوت باستخدام ElevenLabs فشل');
+    if (!transcription) {
+      throw new Error('لم يتم التعرف على أي نص في الصوت');
     }
 
-    // 4. إرسال الصوت للواجهة
-    res.set('Content-Type', contentType);
-    res.send(audioData);
+    // توليد الرد باستخدام Gemini
+    if (!voiceSessions[sessionId]) voiceSessions[sessionId] = [];
+    voiceSessions[sessionId].push({ role: 'user', parts: [{ text: transcription }] });
 
-  } catch (error) {
-    console.error('❌ Error details:', {
-      message: error.message,
-      response: error.response?.data,
-      stack: error.stack
-    });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const result = await model.generateContent({ contents: voiceSessions[sessionId] });
+    const reply = result.response.text();
 
-    const statusCode = error.response?.status || 500;
-    res.status(statusCode).json({
-      error: 'حدث خطأ أثناء المعالجة',
-      details: error.response?.data || error.message,
-      suggestion: 'تحقق من مفاتيح API أو الصيغة أو الرصيد المتاح'
-    });
-  }
-});
+    voiceSessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
 
-// --- API: الحصول على معلومات الفيديو ---
-app.post('/api/get-video-info', async (req, res) => {
-  const { videoUrl } = req.body;
-  if (!videoUrl) return res.status(400).json({ success: false, error: 'videoUrl is required' });
-
-  try {
-    const videoCommand = `${ytDlpPath} -j --format "(bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best)" "${videoUrl}"`;
-    const { stdout: videoStdout } = await execAsync(videoCommand);
-    const videoInfo = JSON.parse(videoStdout);
-
-    const audioCommand = `${ytDlpPath} -j --format "bestaudio" --extract-audio --audio-format mp3 "${videoUrl}"`;
-    const { stdout: audioStdout } = await execAsync(audioCommand);
-    const audioInfo = JSON.parse(audioStdout);
-
-    const processFormats = (formats, type) => {
-      return formats
-        .filter(f => type==='video'? f.ext==='mp4': f.ext==='mp3')
-        .map(f=>({
-          quality: type==='video'? (f.height?`${f.height}p`:f.format_note||'Default'): (f.abr?`${f.abr}kbps`:'Audio'),
-          url: f.url, filesize: f.filesize, ext: f.ext, height: f.height||0, bitrate: f.tbr||f.abr||0
-        }))
-        .sort((a,b)=> type==='video'? a.height-b.height : a.bitrate-b.bitrate);
-    };
-
-    res.json({
-      success:true,
-      data:{
-        id: videoInfo.id,
-        title: videoInfo.title,
-        thumbnail: videoInfo.thumbnail,
-        duration: videoInfo.duration,
-        uploader: videoInfo.uploader,
-        view_count: videoInfo.view_count,
-        formats: processFormats(videoInfo.formats||[], 'video'),
-        audio_formats: processFormats([audioInfo], 'audio'),
-        webpage_url: videoInfo.webpage_url||videoUrl
+    // تحويل النص إلى صوت
+    const ttsResponse = await axios.post(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      {
+        text: reply,
+        voice_settings: { stability: 0.5, similarity_boost: 0.5 }
+      },
+      {
+        headers: {
+          'xi-api-key': process.env.ELEVENLABS_KEY,
+          'Content-Type': 'application/json',
+          'accept': 'audio/mpeg'
+        },
+        responseType: 'arraybuffer'
       }
-    });
+    );
+
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(ttsResponse.data);
 
   } catch (error) {
-    res.status(500).json({ success:false, error:'Failed to process video info' });
+    console.error('Error in speech-to-voice:', error);
+    res.status(500).json({
+      error: 'حدث خطأ أثناء معالجة الصوت',
+      details: error.message
+    });
   }
 });
 
-// --- API: تنزيل فيديو أو صوت ---
-app.get('/api/download', async (req,res)=>{
-  try{
-    const { url: mediaUrl, title, ext, type='video' } = req.query;
-    if(!mediaUrl) return res.status(400).json({ error:'Missing media URL' });
+// 2. نقطة النهاية الذكية للدردشة
+const upload = multer({ storage: multer.memoryStorage() });
 
-    const safeTitle = (title||'media').replace(/[^a-zA-Z0-9_\-.]/g,'_').substring(0,100);
-    const fileExt = ext||(type==='audio'?'mp3':'mp4');
-    const filename = `${safeTitle}.${fileExt}`;
+app.post('/chat', upload.single('image'), async (req, res) => {
+  try {
+    const { message, sessionId = 'default' } = req.body;
+    const imageFile = req.file;
 
-    const parsedUrl = url.parse(mediaUrl);
-    const client = parsedUrl.protocol==='https:'? https : http;
-    client.get(mediaUrl,(streamRes)=>{
-      if(streamRes.statusCode!==200) return res.status(streamRes.statusCode).json({ error:'Failed to fetch media' });
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Type', type==='audio'?'audio/mpeg':'video/mp4');
-      res.setHeader('Content-Length', streamRes.headers['content-length']||'');
-      streamRes.pipe(res);
-    }).on('error',(err)=> res.status(500).json({ error:'Download failed' }));
-  } catch(err){ res.status(500).json({ error:'Server error' }); }
-});
+    if (!message && !imageFile) {
+      return res.status(400).json({ error: "يجب إرسال نص أو صورة" });
+    }
 
-// --- دالة تحديد نوع الطلب باستخدام LLM Gemini ---
-async function decideTool(text, hasImage) {
-const prompt = `
-حدد نوع الطلب من التالي بناءً على النص ووجود صورة:
+    // معالجة الصور إذا وجدت
+    if (imageFile) {
+      if (message.includes('إزالة خلفية') || message.includes('remove background')) {
+        const form = new FormData();
+        form.append('image_file', imageFile.buffer, { filename: 'image.png' });
+        
+        const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
+          headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
+          responseType: 'arraybuffer',
+        });
 
-remove-bg (إذا طلب إزالة خلفية وكانت هناك صورة)
+        return res.json({
+          action: 'remove-bg',
+          image: removeBgResponse.data.toString('base64'),
+          message: "تمت إزالة الخلفية بنجاح"
+        });
+      }
+      else {
+        // معالجة الصورة باستخدام Google Vision
+        const [visionResult] = await visionClient.annotateImage({
+          image: { content: imageFile.buffer },
+          features: [{ type: 'TEXT_DETECTION' }]
+        });
 
-edit-image (إذا طلب تعديل الصورة وكانت هناك صورة)
+        const detectedText = visionResult.fullTextAnnotation?.text || 'لم يتم التعرف على نص';
+        const fullMessage = `${message}\n\nالنص في الصورة:\n${detectedText}`;
 
-chat (إذا كان طلبًا نصيًا عاديًا)
+        if (!textSessions[sessionId]) textSessions[sessionId] = [];
+        textSessions[sessionId].push({ role: 'user', parts: [{ text: fullMessage }] });
 
-النص: "${text}"
-هل يوجد صورة: ${hasImage ? 'نعم' : 'لا'}
-النوع:
-`;
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+        const result = await model.generateContent({ contents: textSessions[sessionId] });
+        const reply = result.response.text();
 
-try {
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
-const response = await model.generateContent({
-contents: [{ role: 'user', parts: [{ text: prompt }] }]
-});
+        textSessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
 
-const tool = response.response.text().trim().toLowerCase();
-if (tool.includes('remove-bg') || tool.includes('remove background')) return 'remove-bg';
-if (tool.includes('edit-image') || tool.includes('edit image')) return 'edit-image';
-return 'chat';
+        return res.json({ reply });
+      }
+    }
 
-} catch (error) {
-console.error('خطأ في تحديد الأداة:', error);
-return 'chat';
-}
-}
+    // معالجة النص فقط
+    if (!textSessions[sessionId]) textSessions[sessionId] = [];
+    textSessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
 
-// --- نقطة النهاية الموحدة الذكية: /chat2 ---
-const sessions = {};
-const upload4 = multer({ storage: multer.memoryStorage() });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const result = await model.generateContent({ contents: textSessions[sessionId] });
+    const reply = result.response.text();
 
-app.post('/chat2', upload4.single('image'), async (req, res) => {
-try {
-const { message, sessionId } = req.body;
-const imageFile = req.file;
+    textSessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
 
-console.log('Received request:', {
-headers: req.headers,
-body: req.body,
-file: !!imageFile
-});
+    res.json({ reply });
 
-if (!sessionId) return res.status(400).json({ error: "Session ID is required" });
-if (!message || message.trim().length === 0) return res.status(400).json({ error: "Message text is required" });
-
-const action = await decideTool(message, !!imageFile);
-
-if (action === 'remove-bg' && imageFile) {
-// حذف الخلفية
-const form = new FormData();
-form.append('image_file', imageFile.buffer, { filename: imageFile.originalname });
-const removeBgResponse = await axios.post('https://api.remove.bg/v1.0/removebg', form, {
-headers: { ...form.getHeaders(), 'X-Api-Key': process.env.REMOVEBG_KEY },
-responseType: 'arraybuffer',
-});
-
-return res.json({
-action: 'remove-bg',
-imageBase64: removeBgResponse.data.toString('base64'),
-message: "Background removed successfully"
-});
-
-} else if (action === 'edit-image' && imageFile) {
-// إعادة تحجيم الصورة مع الحفاظ على المحتوى الكامل
-const processedBuffer = await sharp(imageFile.buffer)
-.resize({
-width: 1024,
-height: 1024,
-fit: 'contain',
-background: { r: 255, g: 255, b: 255 } // يمكن تغييره حسب الحاجة
-})
-.png()
-.toBuffer();
-
-// تجهيز formData للـ Stability AI
-const formData = new FormData();
-formData.append('init_image', processedBuffer, { filename: 'image.png', contentType: 'image/png' });
-formData.append('text_prompts[0][text]', message);
-formData.append('cfg_scale', 7);
-formData.append('clip_guidance_preset', 'FAST_BLUE');
-formData.append('steps', 30);
-
-const response = await axios.post(
-'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
-formData,
-{
-headers: {
-Authorization: `Bearer ${process.env.STABILITY_API_KEY}`,
-Accept: 'application/json',
-...formData.getHeaders()
-},
-maxBodyLength: Infinity
-}
-);
-
-return res.json({
-action: 'edit-image',
-imageBase64: response.data.artifacts[0].base64,
-message: "Image edited successfully"
-});
-
-} else {
-// دردشة نصية
-if (!sessions[sessionId]) sessions[sessionId] = [];
-sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
-
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
-const result = await model.generateContent({ contents: sessions[sessionId] });
-const reply = result.response.text();
-sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
-
-return res.json({ action: 'chat', reply });
-}
-
-} catch (error) {
-console.error("Error processing request:", error);
-console.error("Status:", error.response?.status);
-console.error("Data:", error.response?.data);
-console.error("Headers:", error.response?.headers);
-
-return res.status(500).json({ error: "Internal server error" });
-
-}
+  } catch (error) {
+    console.error('Error in chat endpoint:', error);
+    res.status(500).json({ error: "حدث خطأ أثناء معالجة الطلب" });
+  }
 });
 
 // ================== Telegram Webhook ==================
-const WEBHOOK_URL = `https://keytele.onrender.com/webhook/${token}`;
+const WEBHOOK_URL = `${process.env.BASE_URL}/webhook`;
 bot.setWebHook(WEBHOOK_URL);
 
-app.post(`/webhook/${token}`, (req,res)=>{
+app.post('/webhook', (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-// ================== Telegram Start Command ==================
-bot.onText(/\/start/, async (msg)=>{
+// ================== معالجة رسائل Telegram ==================
+bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const welcomeMessage = `
-مرحباً بك في بوت *KV* .. 🤖
-
-هذا البوت يوفر لك مجموعة من الأدوات الذكية:
-
-1️⃣ **تنزيل الفيديوهات والصوتيات**
-   - احصل على معلومات الفيديو من أي رابط ..
-   - تحميل الفيديو أو الصوت بجودات متعددة ..
-
-2️⃣ **تحرير الصور**
-   - تعديل الصور باستخدام الذكاء الاصطناعي ..
-   - إزالة الخلفية بسهولة ..
-
-3️⃣ **تحليل الصور**
-   - كشف النصوص داخل الصور ..
-   - التعرف على تسميات الأشياء داخل الصورة ..
-
-4️⃣ **دردشة ذكية**
-   - يمكنك التحدث مع البوت مباشرة ..
-   - البوت قادر على فهم أوامر تعديل الصور أو إزالة الخلفية تلقائياً إذا أرسلت صورة مع نص ..
-
-5️⃣ **تفاعل بالصوت**
-   - يمكنك إرسال رسائل صوتية وسيقوم البوت بالرد بصوتي ..
-
-📌 *طريقة الاستخدام:*
-- أرسل رابط الفيديو لتحصل على معلوماته وتحميله ..
-- أرسل صورة مع نص لتعديل الصورة أو إزالة الخلفية ..
-- أرسل أي رسالة نصية لتحدث مع البوت ..
-- أرسل رسالة صوتية لتحصل على رد صوتي ..
-
-استمتع بالتجربة ..! 🚀
-
-💡 مطور البوت: [mrkey7](https://t.me/mrkey7)
-`;
-
-  await bot.sendMessage(chatId, welcomeMessage,{
-    parse_mode:'Markdown',
-    reply_markup:{ inline_keyboard:[[{ text:'🔗 تواصل مع المطور', url:'https://t.me/mrkey7' }]] }
-  });
-});
-
-// ================== Telegram Message Handling مع إشعارات منظمة ==================
-bot.on('message', async (msg)=>{
-  const chatId = msg.chat.id;
-  const username = msg.from.username || `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() || 'Unknown';
-  const keepTyping = (chatId, interval=4000)=> setInterval(()=> bot.sendChatAction(chatId,'typing').catch(console.error), interval);
-
-  try{
-    let typingInterval = keepTyping(chatId);
-
-    // ------------------- Notify Admin -------------------
-    const adminChatId = process.env.ADMIN_CHAT_ID; // ضع هنا رقم شاتك في تلجرام
-    if(adminChatId){
-      const userMessage = msg.text || (msg.caption ? msg.caption : msg.voice ? '[رسالة صوتية]' : '[صورة]');
-      const notifyText = `📨 *رسالة جديدة من المستخدم*\n\n👤 *اسم المستخدم:* @${username}\n💬 *الرسالة:* ${userMessage}`;
-      await bot.sendMessage(adminChatId, notifyText, { parse_mode:'Markdown' }).catch(console.error);
-    }
-    // ---------------------------------------------------
-
-    // ------------------- معالجة الرسائل -------------------
-    if(msg.photo){
-      const fileId = msg.photo[msg.photo.length-1].file_id;
-      const fileLink = await bot.getFileLink(fileId);
-      const axiosResponse = await axios.get(fileLink, { responseType:'arraybuffer' });
-
-      const formData = new FormData();
-      formData.append('image', Buffer.from(axiosResponse.data), { filename:'image.png', contentType:'image/png' });
-      formData.append('message', msg.caption||'');
-      formData.append('sessionId', chatId.toString());
-
-      const response = await axios.post(`https://keytele.onrender.com/chat2`, formData, { headers: formData.getHeaders() });
-      clearInterval(typingInterval);
-
-      if(response.data.action==='edit-image'||response.data.action==='remove-bg'){
-        await bot.sendPhoto(chatId, Buffer.from(response.data.imageBase64,'base64'));
-      } else if(response.data.reply){
-        await bot.sendMessage(chatId, response.data.reply);
-      }
-
-    } else if(msg.voice){
-      // معالجة الرسائل الصوتية
+  
+  try {
+    // رسالة صوتية
+    if (msg.voice) {
       const fileId = msg.voice.file_id;
       const fileLink = await bot.getFileLink(fileId);
-      const axiosResponse = await axios.get(fileLink, { responseType: 'arraybuffer' });
+      const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
       
-      const audioBytes = axiosResponse.data;
+      const audioBase64 = Buffer.from(response.data).toString('base64');
       
-      try {
-        const response = await axios.post(`https://keytele.onrender.com/api/speech-to-voice`, {
-          audio: audioBytes,
-          sessionId: chatId.toString()
-        }, {
-          responseType: 'arraybuffer'
-        });
-        
-        clearInterval(typingInterval);
-        
-        // إرسال الرد الصوتي
-        await bot.sendVoice(chatId, Buffer.from(response.data));
-      } catch (error) {
-        console.error('Error processing voice message:', error);
-        await bot.sendMessage(chatId, 'حدث خطأ أثناء معالجة الرسالة الصوتية، يرجى المحاولة لاحقاً.');
-      }
-
-    } else if(msg.text){
-      const response = await axios.post(`https://keytele.onrender.com/chat2`, { message: msg.text, sessionId: chatId.toString() });
-      clearInterval(typingInterval);
-      if(response.data.reply) await bot.sendMessage(chatId,response.data.reply);
+      const apiResponse = await axios.post(
+        `${process.env.BASE_URL}/api/speech-to-voice`,
+        { audio: audioBase64, sessionId: chatId.toString() },
+        { responseType: 'arraybuffer' }
+      );
+      
+      await bot.sendVoice(chatId, Buffer.from(apiResponse.data));
     }
-    // ---------------------------------------------------
+    // صورة مع أو بدون نص
+    else if (msg.photo) {
+      const fileId = msg.photo[msg.photo.length-1].file_id;
+      const fileLink = await bot.getFileLink(fileId);
+      const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
 
-  }catch(err){
-    console.error('Telegram bot error:', err);
-    await bot.sendMessage(chatId,'حدث خطأ أثناء المعالجة، حاول لاحقاً.');
+      const formData = new FormData();
+      formData.append('image', response.data, { filename: 'photo.jpg' });
+      formData.append('message', msg.caption || '');
+      formData.append('sessionId', chatId.toString());
+
+      const apiResponse = await axios.post(
+        `https://keytele.onrender.com/chat`,
+        formData,
+        { headers: formData.getHeaders() }
+      );
+
+      if (apiResponse.data.image) {
+        await bot.sendPhoto(chatId, Buffer.from(apiResponse.data.image, 'base64'));
+      }
+      if (apiResponse.data.reply) {
+        await bot.sendMessage(chatId, apiResponse.data.reply);
+      }
+    }
+    // رسالة نصية
+    else if (msg.text) {
+      const apiResponse = await axios.post(`https://keytele.onrender.com/chat`, {
+        message: msg.text,
+        sessionId: chatId.toString()
+      });
+
+      await bot.sendMessage(chatId, apiResponse.data.reply);
+    }
+  } catch (error) {
+    console.error('Telegram error:', error);
+    await bot.sendMessage(chatId, 'حدث خطأ أثناء معالجة رسالتك، يرجى المحاولة لاحقاً.');
   }
 });
 
-// ================== Server Listen ==================
+// ================== تشغيل السيرفر ==================
 const PORT = process.env.PORT || 8000;
-app.listen(PORT,()=> console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📞 Telegram webhook: ${WEBHOOK_URL}`);
+});
