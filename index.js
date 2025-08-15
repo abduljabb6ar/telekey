@@ -42,7 +42,9 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const visionClient = new ImageAnnotatorClient({ keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS) });
 
 // 📌 Google Speech Client
-const client = new speech.SpeechClient();
+const client = new speech.SpeechClient({
+  keyFilename: JSON.parse(process.env.GOOGLE_CREDENTIALS)
+});
 
 // جلسات المحادثة الصوتية
 const sessions2 = {};
