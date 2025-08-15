@@ -296,7 +296,7 @@ bot.on('message', async (msg)=>{
   }
 }
     // ------------------- معالجة الصور -------------------
-    } else if(msg.photo){
+     else if(msg.photo){
       const fileId = msg.photo[msg.photo.length-1].file_id;
       const fileLink = await bot.getFileLink(fileId);
       const axiosResponse = await axios.get(fileLink, { responseType:'arraybuffer' });
