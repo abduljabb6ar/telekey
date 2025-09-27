@@ -141,7 +141,7 @@ chat (إذا كان طلبًا نصيًا عاديًا)
 `;
 
 try {
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 const response = await model.generateContent({
 contents: [{ role: 'user', parts: [{ text: prompt }] }]
 });
@@ -236,7 +236,7 @@ message: "Image edited successfully"
 if (!sessions[sessionId]) sessions[sessionId] = [];
 sessions[sessionId].push({ role: 'user', parts: [{ text: message }] });
 
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro-latest' });
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
 const result = await model.generateContent({ contents: sessions[sessionId] });
 const reply = result.response.text();
 sessions[sessionId].push({ role: 'model', parts: [{ text: reply }] });
